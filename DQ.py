@@ -5,15 +5,13 @@ import re
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
                              QHBoxLayout, QWidget, QFileDialog, QLabel, QTableWidget, 
-                             QTableWidgetItem, QCheckBox, QMessageBox, QHeaderView)
+                             QTableWidgetItem, QCheckBox, QMessageBox, QHeaderView, QFrame)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont
 
-# --- 1. 품질 평가 엔진 클래스 ---
 class DQChecker:
     def __init__(self, df, rules):
         self.df = df
-        # rules.json의 'evaluation_rules' 섹션을 가져옴
         self.rules = rules.get("evaluation_rules", {})
 
     def check_value_completeness(self):
@@ -25,50 +23,22 @@ class DQChecker:
         empty_rows = self.df.isnull().all(axis=1).sum()
         return (1 - (empty_rows / len(self.df))) * 100 if len(self.df) > 0 else 100
 
-    # def check_syntax_validity(self):
-    #     syntax_rules = self.rules.get("3_syntax_validity", {}).get("columns", {})
-    #     if not syntax_rules: return 100.0
-    #     invalid_count, total_checks = 0, 0
-    #     for col, pattern in syntax_rules.items():
-    #         if col in self.df.columns:
-    #             invalid_count += self.df[col].astype(str).apply(lambda x: re.match(pattern, x) is None).sum()
-    #             total_checks += len(self.df)
-    #     return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
-    
     def check_syntax_validity(self):
         syntax_rules = self.rules.get("3_syntax_validity", {}).get("columns", {})
-        if not syntax_rules: 
-            return 100.0
-        
-        invalid_count = 0
-        total_checks = 0
-        
+        if not syntax_rules: return 100.0
+        invalid_count, total_checks = 0, 0
         for col, pattern in syntax_rules.items():
             if col in self.df.columns:
-                # 1. 결측치(NaN)를 완전히 제거한 실제 값만 추출
                 series = self.df[col].dropna()
-                
-                # 2. 데이터가 있을 때만 검사 진행
                 if not series.empty:
-                    # 3. 중요: float(1.0) 형태를 정수형 문자열('1')로 변환하여 정규식 오판 방지
                     def clean_str(x):
                         s = str(x)
-                        if s.endswith('.0'): return s[:-2]
-                        return s
-
-                    # 정규식 매칭 수행 (문자열 변환 후 패턴 대조)
-                    # 매칭되지 않는(None인) 경우를 invalid로 카운트
+                        return s[:-2] if s.endswith('.0') else s
                     matches = series.apply(clean_str).apply(lambda x: re.match(pattern, x) is not None)
                     invalid_count += (~matches).sum()
                     total_checks += len(series)
-        
-        # 4. 최종 점수 계산 (검사 대상이 없으면 100점, 있으면 비율 계산)
-        if total_checks == 0:
-            return 100.0
-            
-        score = (1 - (invalid_count / total_checks)) * 100
-        return max(0, score) # 음수 방지
-    
+        return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
+
     def check_semantic_validity(self):
         semantic_rules = self.rules.get("4_semantic_validity", {}).get("columns", {})
         if not semantic_rules: return 100.0
@@ -85,7 +55,6 @@ class DQChecker:
         invalid_count, total_checks = 0, 0
         for col, limits in range_rules.items():
             if col in self.df.columns:
-                # 숫자형 변환 시도 후 범위 체크
                 temp_series = pd.to_numeric(self.df[col], errors='coerce')
                 invalid_count += ((temp_series < limits['min']) | (temp_series > limits['max'])).sum()
                 total_checks += len(self.df)
@@ -97,12 +66,9 @@ class DQChecker:
         total_violations = 0
         for rule in rel_rules:
             try:
-                # formula 예: "HIRE_DATE <= RETIRE_DATE"
                 valid_count = len(self.df.query(rule["formula"], engine='python'))
                 total_violations += (len(self.df) - valid_count)
-            except Exception as e:
-                print(f"Formula Error: {e}")
-                continue
+            except: continue
         total_checks = len(self.df) * len(rel_rules)
         return (1 - (total_violations / total_checks)) * 100 if total_checks > 0 else 100
 
@@ -119,54 +85,139 @@ class DQChecker:
         total_checks = len(self.df) * len(ref_rules)
         return (1 - (total_violations / total_checks)) * 100 if total_checks > 0 else 100
 
-# --- 2. 메인 UI 클래스 ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Data Quality Pro - Studio")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1100, 800)
         self.data_df = None
         self.rules = None
-        
         self.init_ui()
         self.apply_style()
 
     def apply_style(self):
         self.setStyleSheet("""
-            QMainWindow { background-color: #121212; }
-            QWidget { color: #E0E0E0; font-family: 'Segoe UI', Arial; }
+            /* 전체 배경 및 텍스트 설정 */
+            QMainWindow { background-color: #0F111A; }
+            QWidget { color: #CFD8DC; font-family: 'Segoe UI', sans-serif; }
+            
+            /* 버튼 스타일 */
             QPushButton {
-                background-color: #2D2D2D; border: 1px solid #3D3D3D;
-                border-radius: 6px; padding: 12px; font-weight: bold;
+                background-color: #1A1D2E; border: 1px solid #2A2F45;
+                border-radius: 8px; padding: 12px; font-weight: bold;
             }
-            QPushButton:hover { background-color: #3D3D3D; border-color: #0078D4; }
+            QPushButton:hover { background-color: #242942; border-color: #00A3FF; }
             QPushButton#run_btn {
-                background-color: #0078D4; color: white; font-size: 15px; margin-top: 10px;
+                background-color: #00A3FF; color: white; font-size: 16px; margin-top: 15px; border: none;
             }
-            QPushButton#run_btn:hover { background-color: #1086E8; }
-            QCheckBox { spacing: 8px; font-size: 13px; padding: 4px; }
-            QTableWidget {
-                background-color: #1E1E1E; border: 1px solid #333333;
-                gridline-color: #2D2D2D; border-radius: 8px; font-size: 13px;
+            
+            /* 테이블 스타일 */
+           QTableWidget {
+                background-color: #161925; /* 테이블 자체 배경 */
+                alternate-background-color: #1F2335; /* 줄마다 색상 다르게 (필요시) */
+                border: 1px solid #232738;
+                gridline-color: #232738; /* 칸 구분선 색상 */
+                border-radius: 12px;
+                color: #CFD8DC;
+            }
+
+            /* 2. 테이블 내부 아이템(글자/칸) 배경 강제 지정 */
+            QTableWidget::item {
+                background-color: #161925;
+                padding: 5px;
+            }
+
+            /* 3. 데이터 선택 시 배경색 (하얗게 변하는 것 방지) */
+            QTableWidget::item:selected {
+                background-color: #00A3FF;
+                color: white;
+            }
+
+            /* 4. 헤더(Dimension, Accuracy 칸) 디자인 */
+            QHeaderView::section {
+                background-color: #1F2335;
+                color: #78909C;
+                padding: 12px;
+                border: none;
+                font-weight: bold;
+            }
+
+            /* 5. 스크롤바가 붙는 코너(모퉁이) 부분 하얀색 방지 */
+            QAbstractScrollArea QWidget {
+                background-color: #161925;
+            }
+
+            /* 6. 스크롤바 스타일 (강제 적용) */
+            QScrollBar:vertical {
+                border: none;
+                background: #161925;
+                width: 10px;
+            }
+            QScrollBar::handle:vertical {
+                background: #37474F;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #00A3FF;
             }
             QHeaderView::section {
-                background-color: #2D2D2D; color: #AAAAAA; 
-                padding: 10px; border: none; font-weight: bold;
+                background-color: #1F2335; color: #78909C; padding: 12px; border: none;
             }
-            QLabel#status_bar { color: #888888; font-size: 12px; padding: 5px; }
+            
+            /* 하단 등급 컨테이너 */
+            #grade_container {
+                background-color: #1A1D2E; border: 1px solid #2D334A; border-radius: 15px;
+            }
+
+            /* --- 스크롤바 강제 스타일 적용 (이 부분을 수정했습니다) --- */
+            QScrollBar:vertical {
+                border: none;
+                background-color: #161925; /* 배경색 강제 지정 */
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #454D66; /* 바 색상을 조금 더 밝게 조정 */
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #00A3FF;
+            }
+            /* 스크롤바 화살표 버튼을 완전히 투명하게 삭제 */
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
+                height: 0px;
+            }
+            QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {
+                background: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+
+            /* 가로 스크롤바도 동일하게 적용 */
+            QScrollBar:horizontal {
+                border: none;
+                background-color: #161925;
+                height: 12px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #454D66;
+                border-radius: 6px;
+            }
         """)
 
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(25, 25, 25, 25)
 
-        # --- Sidebar (Settings) ---
         sidebar = QVBoxLayout()
-        sidebar.setContentsMargins(20, 20, 20, 20)
-        
-        logo = QLabel("DQ ANALYZER")
-        logo.setStyleSheet("font-size: 22px; font-weight: 900; color: #0078D4; margin-bottom: 20px;")
+        logo = QLabel("DQ STUDIO")
+        logo.setStyleSheet("font-size: 24px; font-weight: 800; color: #00A3FF; margin-bottom: 25px;")
         sidebar.addWidget(logo)
 
         self.btn_data = QPushButton("📁 Load Dataset")
@@ -176,101 +227,117 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.btn_data)
         sidebar.addWidget(self.btn_json)
 
-        sidebar.addSpacing(30)
-        sidebar.addWidget(QLabel("METRIC SELECTION"))
-        
+        sidebar.addSpacing(35)
+        sidebar.addWidget(QLabel("ANALYSIS METRICS"))
         self.checks = {
-            "Value": QCheckBox("Value Completeness"),
-            "Record": QCheckBox("Record Integrity"),
-            "Syntax": QCheckBox("Syntax Validity"),
-            "Semantic": QCheckBox("Semantic Validity"),
-            "Range": QCheckBox("Range Validity"),
-            "Rel": QCheckBox("Relational Logic"),
-            "Ref": QCheckBox("Referential Integrity")
+            "Value": QCheckBox("데이터값완전성"), "Record": QCheckBox("데이터레코드완전성"),
+            "Syntax": QCheckBox("구문유효성"), "Semantic": QCheckBox("의미유효성"),
+            "Range": QCheckBox("범위유효성"), "Rel": QCheckBox("관계유효성"), "Ref": QCheckBox("참조무결일관성")
         }
         for cb in self.checks.values():
             cb.setChecked(True)
             sidebar.addWidget(cb)
 
         sidebar.addStretch()
-        
         self.btn_run = QPushButton("START ANALYSIS")
         self.btn_run.setObjectName("run_btn")
         self.btn_run.clicked.connect(self.run_eval)
         sidebar.addWidget(self.btn_run)
         
-        self.status_bar = QLabel("Waiting for files...")
-        self.status_bar.setObjectName("status_bar")
+        self.status_bar = QLabel("System Ready")
         sidebar.addWidget(self.status_bar)
 
-        # --- Content (Results) ---
-        content = QVBoxLayout()
+        content_area = QVBoxLayout()
         self.result_table = QTableWidget(0, 2)
-        self.result_table.setHorizontalHeaderLabels(["Quality Dimension", "Score (%)"])
+        self.result_table.setHorizontalHeaderLabels(["Dimension", "Accuracy"])
         self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        content.addWidget(self.result_table)
+        content_area.addWidget(self.result_table)
+
+        # --- 등급 판정 하단 패널 ---
+        self.grade_container = QFrame()
+        self.grade_container.setObjectName("grade_container")
+        self.grade_container.setFixedHeight(160)
+        grade_layout = QHBoxLayout(self.grade_container)
+
+        self.grade_badge = QLabel("-")
+        self.grade_badge.setFixedSize(90, 90)
+        self.grade_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.grade_badge.setStyleSheet("background-color: #232738; border-radius: 45px; color: #444; font-size: 45px; font-weight: bold; border: 2px solid #2D334A;")
+        
+        text_info = QVBoxLayout()
+        self.grade_title = QLabel("QUALITY REPORT SUMMARY")
+        self.grade_title.setStyleSheet("color: #546E7A; font-size: 12px; font-weight: bold;")
+        self.avg_score_label = QLabel("Wait for analysis...")
+        self.avg_score_label.setStyleSheet("color: #FFFFFF; font-size: 28px; font-weight: bold;")
+        self.grade_desc = QLabel("Result description will appear here.")
+        self.grade_desc.setStyleSheet("color: #546E7A; font-size: 14px;")
+        
+        text_info.addWidget(self.grade_title)
+        text_info.addWidget(self.avg_score_label)
+        text_info.addWidget(self.grade_desc)
+
+        grade_layout.addWidget(self.grade_badge)
+        grade_layout.addSpacing(30)
+        grade_layout.addLayout(text_info)
+        grade_layout.addStretch()
+        content_area.addWidget(self.grade_container)
 
         main_layout.addLayout(sidebar, 1)
-        main_layout.addLayout(content, 3)
+        main_layout.addLayout(content_area, 3)
 
     def load_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Data", "", "Data (*.csv *.xlsx)")
         if path:
-            try:
-                self.data_df = pd.read_csv(path) if path.endswith('.csv') else pd.read_excel(path)
-                self.status_bar.setText(f"Data Loaded: {os.path.basename(path)}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load data: {e}")
+            self.data_df = pd.read_csv(path) if path.endswith('.csv') else pd.read_excel(path)
+            self.status_bar.setText(f"File: {os.path.basename(path)}")
 
     def load_json(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Rules", "", "JSON (*.json)")
         if path:
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    self.rules = json.load(f)
-                self.status_bar.setText(f"Rules Loaded: {os.path.basename(path)}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Invalid JSON: {e}")
+            with open(path, 'r', encoding='utf-8') as f:
+                self.rules = json.load(f)
+            self.status_bar.setText(f"Rules: {os.path.basename(path)}")
 
     def run_eval(self):
-        if self.data_df is None or self.rules is None:
-            QMessageBox.warning(self, "Warning", "Please load both Data and JSON files first.")
-            return
-        
-        self.status_bar.setText("Analyzing...")
-        QApplication.processEvents() # UI 업데이트 강제 실행
+        if self.data_df is None or self.rules is None: return
         
         checker = DQChecker(self.data_df, self.rules)
         mapping = {
-            "Value": ("Data Value Completeness", checker.check_value_completeness),
-            "Record": ("Record Level Completeness", checker.check_record_completeness),
-            "Syntax": ("Syntactic Validity (Regex)", checker.check_syntax_validity),
-            "Semantic": ("Semantic Domain Validity", checker.check_semantic_validity),
-            "Range": ("Numeric Range Validity", checker.check_range_validity),
-            "Rel": ("Relational Consistency", checker.check_relationship_validity),
-            "Ref": ("Referential Integrity", checker.check_referential_integrity)
+            "Value": ("데이터값완전성", checker.check_value_completeness),
+            "Record": ("데이터레코드완전성", checker.check_record_completeness),
+            "Syntax": ("구문유효성", checker.check_syntax_validity),
+            "Semantic": ("의미유효성", checker.check_semantic_validity),
+            "Range": ("범위유효성", checker.check_range_validity),
+            "Rel": ("관계유효성", checker.check_relationship_validity),
+            "Ref": ("참조무결일관성", checker.check_referential_integrity)
         }
 
         self.result_table.setRowCount(0)
-        for i, (key, (name, func)) in enumerate(mapping.items()):
+        scores = []
+        for key, (name, func) in mapping.items():
             if self.checks[key].isChecked():
-                row_idx = self.result_table.rowCount()
-                self.result_table.insertRow(row_idx)
-                
+                row = self.result_table.rowCount()
+                self.result_table.insertRow(row)
                 score = func()
-                name_item = QTableWidgetItem(name)
-                score_item = QTableWidgetItem(f"{score:.2f} %")
-                
-                # 점수에 따른 색상 강조 (80점 미만 오렌지, 60점 미만 레드)
-                if score < 60: score_item.setForeground(QColor("#FF5252"))
-                elif score < 90: score_item.setForeground(QColor("#FFAB40"))
-                else: score_item.setForeground(QColor("#69F0AE"))
-                
-                score_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.result_table.setItem(row_idx, 0, name_item)
-                self.result_table.setItem(row_idx, 1, score_item)
+                scores.append(score)
+                self.result_table.setItem(row, 0, QTableWidgetItem(name))
+                self.result_table.setItem(row, 1, QTableWidgetItem(f"{score:.2f}%"))
 
-        self.status_bar.setText("Analysis Finished Successfully.")
+        if scores:
+            avg = sum(scores) / len(scores)
+            if avg >= 99: g, color, desc = "A", "#00E676", "Excellent: High quality data detected."
+            elif avg >= 97: g, color, desc = "B", "#00B0FF", "Good: Reliable data with minor issues."
+            elif avg >= 95: g, color, desc = "C", "#FFD600", "Fair: Attention required."
+            else: g, color, desc = "D", "#FF5252", "Poor: Needs cleansing."
+
+            self.grade_badge.setText(g)
+            # 테두리는 어둡게 고정하고, 글자색(color)만 바꿔서 깔끔하게 유지합니다.
+            self.grade_badge.setStyleSheet(f"background-color: #1A1D2E; border-radius: 45px; color: {color}; font-size: 45px; font-weight: bold; border: 3px solid {color};")
+            self.avg_score_label.setText(f"{avg:.2f}%")
+            self.grade_desc.setText(desc)
+            self.grade_desc.setStyleSheet(f"color: {color}; font-size: 14px;")
+            # 컨테이너 테두리는 아주 은은하게만 강조합니다.
+            self.grade_container.setStyleSheet(f"background-color: #161925; border: 1px solid #2D334A; border-radius: 15px;")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
