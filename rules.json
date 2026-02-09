@@ -1,20 +1,22 @@
 {
   "evaluation_rules": {
     "3_syntax_validity": {
-      "description": "측정 번호가 숫자 형식인지, 화학배경이 텍스트인지 확인",
+      "description": "Chemical은 단일 알파벳 형식, Background는 텍스트 형식 확인",
       "columns": {
         "Measurement_No": "^\\d+$",
-        "ChemicalBackground": "^[a-zA-Z]+$"
+        "Chemical": "^[A-Z]$",
+        "Background": "^[a-zA-Z]+$"
       }
     },
     "4_semantic_validity": {
-      "description": "배경 데이터가 실험 조건(Blackbody)에 맞게 들어왔는지 확인",
+      "description": "Chemical은 F, C, O, N 중 하나, Background는 Blackbody 고정",
       "columns": {
-        "ChemicalBackground": ["Blackbody", "Ammonia", "Methane"]
+        "Chemical": ["F", "C", "O", "N"],
+        "Background": ["Blackbody"]
       }
     },
     "5_range_validity": {
-      "description": "온도 및 복사 에너지 센서값이 물리적 한계 내에 있는지 확인",
+      "description": "온도 및 센서값(640, 1400) 물리적 한계 확인",
       "columns": {
         "Temperature_C": { "min": -50, "max": 100 },
         "640": { "min": 0, "max": 1.0 },
@@ -22,7 +24,7 @@
       }
     },
     "6_relationship_validity": {
-      "description": "온도가 높을수록 복사 에너지(640nm 등)도 높아지는지 논리 체크",
+      "description": "온도와 복사 에너지 간의 논리적 경향성 체크",
       "rules": [
         { "name": "플랑크법칙_경향성", "formula": "not (Temperature_C > 25 and 640 < 0.05)" }
       ]
