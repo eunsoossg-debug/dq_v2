@@ -18,7 +18,7 @@
     "5_range_validity": {
       "description": "온도 및 센서값(640, 1400) 물리적 한계 확인",
       "columns": {
-        "Temperature_C": { "min": -50, "max": 100 },
+        "Temperature_C": { "min": -50, "max": 50 },
         "640": { "min": 0, "max": 1.0 },
         "1400": { "min": 0, "max": 1.0 }
       }
