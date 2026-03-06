@@ -5,7 +5,7 @@ import re
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
                              QHBoxLayout, QWidget, QFileDialog, QLabel, QTableWidget, 
-                             QTableWidgetItem, QCheckBox, QMessageBox, QHeaderView, QFrame)
+                             QTableWidgetItem, QCheckBox, QHeaderView, QFrame)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont
 
@@ -13,6 +13,8 @@ class DQChecker:
     def __init__(self, df, rules):
         self.df = df
         self.rules = rules.get("evaluation_rules", {})
+        # 각 지표별 상세 오류 정보를 담는 컨테이너
+        self.error_report = {}
 
     def check_value_completeness(self):
         total_cells = self.df.size
@@ -85,6 +87,171 @@ class DQChecker:
         total_checks = len(self.df) * len(ref_rules)
         return (1 - (total_violations / total_checks)) * 100 if total_checks > 0 else 100
 
+    # ---------- 상세 오류 리포트 생성 ----------
+    def generate_error_report(self, max_examples_per_item: int = 5):
+        """
+        각 평가 항목별로 어떤 컬럼/행에서 어떤 문제가 발생했는지 요약 리포트를 생성합니다.
+        너무 많은 레코드를 모두 담기보다는, 컬럼/규칙별로 개수와 예시 몇 개만 제공합니다.
+        """
+        report = {}
+
+        # 1. 값 완전성 - 컬럼별 결측치 개수 요약
+        null_counts = self.df.isnull().sum()
+        issues = []
+        for col, cnt in null_counts.items():
+            if cnt > 0:
+                issues.append({
+                    "column": str(col),
+                    "missing_count": int(cnt),
+                    "total_count": int(len(self.df)),
+                    "suggestion": "해당 컬럼의 결측값을 적절한 값으로 채우거나, 불필요한 행은 제거하는 것을 고려하세요."
+                })
+        if issues:
+            report["1_value_completeness"] = issues
+
+        # 2. 레코드 완전성 - 전체가 비어 있는 행
+        empty_rows_mask = self.df.isnull().all(axis=1)
+        empty_indices = self.df.index[empty_rows_mask].tolist()
+        if empty_indices:
+            report["2_record_completeness"] = [{
+                "empty_row_indices_example": [int(i) for i in empty_indices[:max_examples_per_item]],
+                "empty_row_count": int(len(empty_indices)),
+                "suggestion": "완전히 비어 있는 레코드는 제거하거나 필요한 데이터를 입력하는 것이 좋습니다."
+            }]
+
+        # 3. 구문 유효성 - 정규식 미일치 값
+        syntax_rules = self.rules.get("3_syntax_validity", {}).get("columns", {})
+        syntax_issues = []
+        for col, pattern in syntax_rules.items():
+            if col not in self.df.columns:
+                continue
+            series = self.df[col].dropna()
+            if series.empty:
+                continue
+
+            def clean_str(x):
+                s = str(x)
+                return s[:-2] if s.endswith('.0') else s
+
+            cleaned = series.apply(clean_str)
+            matches = cleaned.apply(lambda x: re.match(pattern, x) is not None)
+            invalid_idx = cleaned[~matches].index
+            if not len(invalid_idx):
+                continue
+
+            examples = cleaned.loc[invalid_idx].astype(str).head(max_examples_per_item).tolist()
+            syntax_issues.append({
+                "column": str(col),
+                "invalid_value_count": int(len(invalid_idx)),
+                "pattern": pattern,
+                "invalid_examples": examples,
+                "suggestion": "해당 컬럼의 값이 지정한 형식(정규식 패턴)에 맞도록 전처리하거나 규칙을 조정하세요."
+            })
+        if syntax_issues:
+            report["3_syntax_validity"] = syntax_issues
+
+        # 4. 의미 유효성 - 허용 목록에 없는 값
+        semantic_rules = self.rules.get("4_semantic_validity", {}).get("columns", {})
+        semantic_issues = []
+        for col, valid_list in semantic_rules.items():
+            if col not in self.df.columns:
+                continue
+            invalid_mask = ~self.df[col].isin(valid_list)
+            invalid_idx = self.df.index[invalid_mask].tolist()
+            if not invalid_idx:
+                continue
+
+            examples = self.df.loc[invalid_mask, col].astype(str).head(max_examples_per_item).tolist()
+            semantic_issues.append({
+                "column": str(col),
+                "invalid_value_count": int(len(invalid_idx)),
+                "valid_values_example": list(map(str, list(valid_list)[:max_examples_per_item])),
+                "invalid_examples": examples,
+                "suggestion": "허용된 코드/값(valid list)을 기준으로 데이터 값을 정제하거나, 필요 시 규칙의 허용 목록을 갱신하세요."
+            })
+        if semantic_issues:
+            report["4_semantic_validity"] = semantic_issues
+
+        # 5. 범위 유효성 - min/max 밖의 수치
+        range_rules = self.rules.get("5_range_validity", {}).get("columns", {})
+        range_issues = []
+        for col, limits in range_rules.items():
+            if col not in self.df.columns:
+                continue
+            temp_series = pd.to_numeric(self.df[col], errors='coerce')
+            invalid_mask = (temp_series < limits["min"]) | (temp_series > limits["max"])
+            invalid_idx = temp_series.index[invalid_mask].tolist()
+            if not invalid_idx:
+                continue
+
+            examples = temp_series[invalid_mask].head(max_examples_per_item).astype(str).tolist()
+            range_issues.append({
+                "column": str(col),
+                "invalid_value_count": int(len(invalid_idx)),
+                "expected_range": {"min": limits["min"], "max": limits["max"]},
+                "invalid_examples": examples,
+                "suggestion": "데이터 입력 오류(단위, 오타 등)를 확인하고, 정상적인 범위로 보정하거나 잘못된 레코드를 제거하세요."
+            })
+        if range_issues:
+            report["5_range_validity"] = range_issues
+
+        # 6. 관계 유효성 - formula 규칙 위반 행
+        rel_rules = self.rules.get("6_relationship_validity", {}).get("rules", [])
+        rel_issues = []
+        for rule in rel_rules:
+            formula = rule.get("formula")
+            if not formula:
+                continue
+            try:
+                valid_idx = self.df.query(formula, engine="python").index
+                valid_set = set(valid_idx)
+                violated_idx = [i for i in self.df.index if i not in valid_set]
+                if not violated_idx:
+                    continue
+                rel_issues.append({
+                    "formula": formula,
+                    "violated_row_count": int(len(violated_idx)),
+                    "violated_row_indices_example": [int(i) for i in violated_idx[:max_examples_per_item]],
+                    "suggestion": "비즈니스 규칙(formula)에 맞게 관련 컬럼 값을 함께 수정하거나, 규칙 자체가 맞는지 재검토하세요."
+                })
+            except Exception:
+                continue
+        if rel_issues:
+            report["6_relationship_validity"] = rel_issues
+
+        # 7. 참조 무결성 - 부모 테이블에 존재하지 않는 값
+        ref_rules = self.rules.get("7_referential_integrity", {}).get("checks", [])
+        ref_issues = []
+        for rule in ref_rules:
+            try:
+                p_path = rule["parent_file"]
+                p_df = pd.read_csv(p_path) if p_path.endswith(".csv") else pd.read_excel(p_path)
+                child_col = rule["child_column"]
+                parent_col = rule["parent_column"]
+                if child_col not in self.df.columns or parent_col not in p_df.columns:
+                    continue
+                invalid_mask = ~self.df[child_col].isin(p_df[parent_col])
+                invalid_idx = self.df.index[invalid_mask].tolist()
+                if not invalid_idx:
+                    continue
+                examples = self.df.loc[invalid_mask, child_col].astype(str).head(max_examples_per_item).tolist()
+                ref_issues.append({
+                    "child_column": child_col,
+                    "parent_file": p_path,
+                    "parent_column": parent_col,
+                    "violated_row_count": int(len(invalid_idx)),
+                    "invalid_examples": examples,
+                    "suggestion": "자식 테이블의 값이 부모(참조) 테이블에 존재하는지 확인하고, 잘못된 코드를 수정하거나 참조 데이터를 먼저 등록하세요."
+                })
+            except Exception:
+                continue
+        if ref_issues:
+            report["7_referential_integrity"] = ref_issues
+
+        # 내부 상태로도 보관
+        self.error_report = report
+        return report
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -92,6 +259,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 800)
         self.data_df = None
         self.rules = None
+        self.last_error_report = None
         self.init_ui()
         self.apply_style()
 
@@ -248,10 +416,18 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.status_bar)
 
         content_area = QVBoxLayout()
+
+        # 상단: 요약 점수 테이블
         self.result_table = QTableWidget(0, 2)
         self.result_table.setHorizontalHeaderLabels(["Dimension", "Accuracy"])
         self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         content_area.addWidget(self.result_table)
+
+        # 중단: 상세 오류 리포트 테이블
+        self.error_table = QTableWidget(0, 4)
+        self.error_table.setHorizontalHeaderLabels(["Category", "Target", "Issue / Count", "Suggestion"])
+        self.error_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        content_area.addWidget(self.error_table)
 
         # --- 등급 판정 하단 패널 ---
         self.grade_container = QFrame()
@@ -300,7 +476,7 @@ class MainWindow(QMainWindow):
 
     def run_eval(self):
         if self.data_df is None or self.rules is None: return
-        
+
         checker = DQChecker(self.data_df, self.rules)
         mapping = {
             "Value": ("데이터값완전성", checker.check_value_completeness),
@@ -313,6 +489,7 @@ class MainWindow(QMainWindow):
         }
 
         self.result_table.setRowCount(0)
+        self.error_table.setRowCount(0)
         scores = []
         for key, (name, func) in mapping.items():
             if self.checks[key].isChecked():
@@ -338,6 +515,82 @@ class MainWindow(QMainWindow):
             self.grade_desc.setStyleSheet(f"color: {color}; font-size: 14px;")
             # 컨테이너 테두리는 아주 은은하게만 강조합니다.
             self.grade_container.setStyleSheet(f"background-color: #161925; border: 1px solid #2D334A; border-radius: 15px;")
+
+        # 상세 오류 리포트 생성 후 테이블에 표시
+        error_report = checker.generate_error_report()
+        self.last_error_report = error_report
+        self.populate_error_table(error_report)
+
+    def populate_error_table(self, report):
+        """generate_error_report 결과 딕셔너리를 GUI 테이블 형태로 변환해서 표시."""
+        self.error_table.setRowCount(0)
+        if not report:
+            return
+
+        def add_row(category, target, issue, suggestion):
+            row = self.error_table.rowCount()
+            self.error_table.insertRow(row)
+            self.error_table.setItem(row, 0, QTableWidgetItem(str(category)))
+            self.error_table.setItem(row, 1, QTableWidgetItem(str(target)))
+            self.error_table.setItem(row, 2, QTableWidgetItem(str(issue)))
+            self.error_table.setItem(row, 3, QTableWidgetItem(str(suggestion)))
+
+        # 1. 값 완전성
+        for item in report.get("1_value_completeness", []):
+            cat = "값 완전성"
+            target = item.get("column")
+            issue = f"결측 {item.get('missing_count', 0)} / {item.get('total_count', 0)}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
+
+        # 2. 레코드 완전성
+        for item in report.get("2_record_completeness", []):
+            cat = "레코드 완전성"
+            target = "전체 행"
+            issue = f"완전 빈 행 {item.get('empty_row_count', 0)}개, 예시 인덱스: {item.get('empty_row_indices_example', [])}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
+
+        # 3. 구문 유효성
+        for item in report.get("3_syntax_validity", []):
+            cat = "구문 유효성"
+            target = f"{item.get('column')} (패턴: {item.get('pattern')})"
+            issue = f"형식 불일치 {item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
+
+        # 4. 의미 유효성
+        for item in report.get("4_semantic_validity", []):
+            cat = "의미 유효성"
+            target = item.get("column")
+            issue = f"허용값 외 {item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
+
+        # 5. 범위 유효성
+        for item in report.get("5_range_validity", []):
+            cat = "범위 유효성"
+            target = item.get("column")
+            rng = item.get("expected_range", {})
+            issue = f"범위({rng.get('min')}, {rng.get('max')}) 밖 값 {item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
+
+        # 6. 관계 유효성
+        for item in report.get("6_relationship_validity", []):
+            cat = "관계 유효성"
+            target = f"formula: {item.get('formula')}"
+            issue = f"규칙 위반 행 {item.get('violated_row_count', 0)}개, 예시 인덱스: {item.get('violated_row_indices_example', [])}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
+
+        # 7. 참조 무결성
+        for item in report.get("7_referential_integrity", []):
+            cat = "참조 무결성"
+            target = f"{item.get('child_column')} -> {item.get('parent_column')} ({os.path.basename(item.get('parent_file', ''))})"
+            issue = f"부모에 없는 값 {item.get('violated_row_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            sugg = item.get("suggestion", "")
+            add_row(cat, target, issue, sugg)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
