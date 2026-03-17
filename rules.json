@@ -16,12 +16,17 @@
       }
     },
     "5_range_validity": {
-      "description": "온도 및 센서값(640, 1400) 물리적 한계 확인",
+      "description": "온도 및 센서값(640~400) 물리적 한계 확인",
       "columns": {
-        "Temperature_C": { "min": -50, "max": 50 },
-        "640": { "min": 0, "max": 1.0 },
-        "1400": { "min": 0, "max": 1.0 }
-      }
+        "Temperature_C": { "min": -50, "max": 50 }
+      },
+      "column_groups": [
+        {
+          "match_regex": "^\\d+$",
+          "min": 0,
+          "max": 1.0
+        }
+      ] 
     },
     "6_relationship_validity": {
       "description": "온도와 복사 에너지 간의 논리적 경향성 체크",

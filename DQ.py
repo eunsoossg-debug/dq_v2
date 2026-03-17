@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QIcon
 
+
 class DQChecker:
     def __init__(self, df, rules):
         self.df = df
@@ -62,19 +63,40 @@ class DQChecker:
         return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
 
     def check_range_validity(self):
-        range_rules = self.rules.get("5_range_validity", {}).get("columns", {})
-        if not range_rules:
-            return 100.0
+        range_rule = self.rules.get("5_range_validity", {})
+        column_rules = range_rule.get("columns", {})
+        group_rules = range_rule.get("column_groups", [])
 
         invalid_count, total_checks = 0, 0
-        for col, limits in range_rules.items():
+        checked_columns = set()
+
+        # 1) 명시적으로 지정한 컬럼 규칙
+        for col, limits in column_rules.items():
             if col in self.df.columns:
                 temp_series = pd.to_numeric(self.df[col], errors="coerce")
                 invalid_count += ((temp_series < limits["min"]) | (temp_series > limits["max"])).sum()
                 total_checks += len(self.df)
+                checked_columns.add(col)
+    # 2) 그룹 규칙 (예: 숫자형 wavelength 컬럼 전체)
+        for group in group_rules:
+            pattern = group.get("match_regex")
+            min_val = group.get("min")
+            max_val = group.get("max")
+
+            if not pattern:
+                continue
+        
+        for col in self.df.columns:
+            if col in checked_columns:
+                continue
+            if re.match(pattern, str(col)):
+                temp_series = pd.to_numeric(self.df[col], errors="coerce")
+                invalid_count += ((temp_series < min_val) | (temp_series > max_val)).sum()
+                total_checks += len(self.df)
+                checked_columns.add(col)
 
         return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
-
+    
     def check_relationship_validity(self):
         rel_rules = self.rules.get("6_relationship_validity", {}).get("rules", [])
         if not rel_rules:
@@ -191,15 +213,22 @@ class DQChecker:
             report["4_semantic_validity"] = semantic_issues
 
         # 5. 범위 유효성
-        range_rules = self.rules.get("5_range_validity", {}).get("columns", {})
+        range_rule = self.rules.get("5_range_validity", {})
+        column_rules = range_rule.get("columns", {})
+        group_rules = range_rule.get("column_groups", [])
         range_issues = []
-        for col, limits in range_rules.items():
+        checked_columns = set()
+
+        # 1) 명시적 컬럼 규칙
+        for col, limits in column_rules.items():
             if col not in self.df.columns:
                 continue
 
             temp_series = pd.to_numeric(self.df[col], errors="coerce")
             invalid_mask = (temp_series < limits["min"]) | (temp_series > limits["max"])
             invalid_idx = temp_series.index[invalid_mask].tolist()
+            checked_columns.add(col)
+
             if not invalid_idx:
                 continue
 
@@ -211,6 +240,36 @@ class DQChecker:
                 "invalid_examples": examples,
                 "suggestion": "데이터 입력 오류(단위, 오타 등)를 확인하고, 정상적인 범위로 보정하거나 잘못된 레코드를 제거하세요."
             })
+
+        # 2) 그룹 규칙
+        for group in group_rules:
+            pattern = group.get("match_regex")
+            min_val = group.get("min")
+            max_val = group.get("max")
+
+            if not pattern:
+                continue
+
+            for col in self.df.columns:
+                if col in checked_columns:
+                    continue
+                if re.match(pattern, str(col)):
+                    temp_series = pd.to_numeric(self.df[col], errors="coerce")
+                    invalid_mask = (temp_series < min_val) | (temp_series > max_val)
+                    invalid_idx = temp_series.index[invalid_mask].tolist()
+
+                    if not invalid_idx:
+                        continue
+
+                    examples = temp_series[invalid_mask].head(max_examples_per_item).astype(str).tolist()
+                    range_issues.append({
+                        "column": str(col),
+                        "invalid_value_count": int(len(invalid_idx)),
+                        "expected_range": {"min": min_val, "max": max_val},
+                        "invalid_examples": examples,
+                        "suggestion": "데이터 입력 오류(단위, 오타 등)를 확인하고, 정상적인 범위로 보정하거나 잘못된 레코드를 제거하세요."
+                    })
+
         if range_issues:
             report["5_range_validity"] = range_issues
 
@@ -256,7 +315,7 @@ class DQChecker:
                 if not invalid_idx:
                     continue
 
-                examples = self.df.loc[invalid_mask, child_col].astype(str).head(max_examples_per_item).tolist()
+                    examples = self.df.loc[invalid_mask, child_col].astype(str).head(max_examples_per_item).tolist()
                 ref_issues.append({
                     "child_column": child_col,
                     "parent_file": p_path,
@@ -331,7 +390,7 @@ class MainWindow(QMainWindow):
             QHeaderView::section {
                 background-color: #1F2335;
                 color: #78909C;
-                padding: 12px;
+                padding: 10px;
                 border: none;
                 font-weight: bold;
             }
@@ -406,18 +465,29 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(QLabel("ANALYSIS METRICS"))
 
         self.checks = {
-            "Value": QCheckBox("데이터값완전성"),
-            "Record": QCheckBox("데이터레코드완전성"),
-            "Syntax": QCheckBox("구문유효성"),
-            "Semantic": QCheckBox("의미유효성"),
-            "Range": QCheckBox("범위유효성"),
-            "Rel": QCheckBox("관계유효성"),
-            "Ref": QCheckBox("참조무결일관성")
+            "Value": QCheckBox("1. 데이터값완전성"),
+            "Record": QCheckBox("2. 데이터레코드완전성"),
+            "Syntax": QCheckBox("3. 구문유효성"),
+            "Semantic": QCheckBox("4. 의미유효성"),
+            "Range": QCheckBox("5. 범위유효성"),
+            "Rel": QCheckBox("6. 관계유효성"),
+            "Ref": QCheckBox("7. 참조무결일관성")
         }
 
         for cb in self.checks.values():
             cb.setChecked(True)
             sidebar.addWidget(cb)
+
+        rules_label = QLabel("LOADED RULES")
+        rules_label.setStyleSheet("color: #78909C; font-size: 11px; font-weight: bold; margin-top: 10px;")
+        sidebar.addWidget(rules_label)
+
+        self.rules_table = QTableWidget(0, 2)
+        self.rules_table.setHorizontalHeaderLabels(["Metric", "Rule"])
+        self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.rules_table.verticalHeader().setVisible(False)
+        self.rules_table.setFixedHeight(180)
+        sidebar.addWidget(self.rules_table)
 
         sidebar.addStretch()
 
@@ -436,19 +506,16 @@ class MainWindow(QMainWindow):
 
         content_area = QVBoxLayout()
 
-        # 상단: 요약 점수 테이블
         self.result_table = QTableWidget(0, 2)
         self.result_table.setHorizontalHeaderLabels(["Dimension", "Accuracy"])
         self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         content_area.addWidget(self.result_table)
 
-        # 중단: 상세 오류 리포트 테이블
         self.error_table = QTableWidget(0, 4)
         self.error_table.setHorizontalHeaderLabels(["Category", "Target", "Issue / Count", "Suggestion"])
         self.error_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         content_area.addWidget(self.error_table)
 
-        # 하단: 등급 패널
         self.grade_container = QFrame()
         self.grade_container.setObjectName("grade_container")
         self.grade_container.setFixedHeight(160)
@@ -499,9 +566,63 @@ class MainWindow(QMainWindow):
                 with open(path, "r", encoding="utf-8") as f:
                     self.rules = json.load(f)
                 self.status_bar.setText(f"Rules loaded: {os.path.basename(path)}")
+                self.populate_rules_table()
             except Exception as e:
                 self.status_bar.setText(f"룰 로드 실패: {str(e)}")
 
+    def populate_rules_table(self):
+        self.rules_table.setRowCount(0)
+
+        if not self.rules or "evaluation_rules" not in self.rules:
+            return
+
+        rules = self.rules["evaluation_rules"]
+
+        def shorten(text, max_len=28):
+            text = str(text)
+            return text if len(text) <= max_len else text[:max_len - 3] + "..."
+
+        def add_row(metric, rule_text):
+            row = self.rules_table.rowCount()
+            self.rules_table.insertRow(row)
+
+            metric_item = QTableWidgetItem(str(metric))
+            rule_item = QTableWidgetItem(shorten(rule_text))
+
+             # 전체 rule은 툴팁으로 표시
+            rule_item.setToolTip(str(rule_text))
+            metric_item.setToolTip(str(metric))
+
+            self.rules_table.setItem(row, 0, metric_item)
+            self.rules_table.setItem(row, 1, rule_item)
+    
+        syntax_cols = rules.get("3_syntax_validity", {}).get("columns", {})
+        for col, pattern in syntax_cols.items():
+            add_row("3.구문유효성", f"{col}: {pattern}")
+
+        semantic_cols = rules.get("4_semantic_validity", {}).get("columns", {})
+        for col, valid_list in semantic_cols.items():
+            add_row("4.의미유효성", f"{col}: {', '.join(map(str, valid_list))}")
+
+        range_cols = rules.get("5_range_validity", {}).get("columns", {})
+        for col, limits in range_cols.items():
+            add_row("5.범위유효성", f"{col}: {limits.get('min')}~{limits.get('max')}")
+        
+        group_rules = rules.get("5_range_validity", {}).get("column_groups", [])
+        for group in group_rules:
+            add_row("5.범위유효성", f"{group.get('match_regex')}: {group.get('min')}~{group.get('max')}")
+
+        rel_rules = rules.get("6_relationship_validity", {}).get("rules", [])
+        for rule in rel_rules:
+            add_row("6.관계유효성", rule.get("name", rule.get("formula", "")))
+
+        ref_rules = rules.get("7_referential_integrity", {}).get("checks", [])
+        for rule in ref_rules:
+            child_col = rule.get("child_column", "")
+            parent_col = rule.get("parent_column", "")
+            parent_file = os.path.basename(rule.get("parent_file", ""))
+            add_row("7.참조무결성", f"{child_col} -> {parent_col} ({parent_file})")
+    
     def run_eval(self):
         if self.data_df is None:
             self.status_bar.setText("먼저 데이터 파일을 불러오세요.")
@@ -585,7 +706,6 @@ class MainWindow(QMainWindow):
             self.error_table.setItem(row, 2, QTableWidgetItem(str(issue)))
             self.error_table.setItem(row, 3, QTableWidgetItem(str(suggestion)))
 
-        # 1. 값 완전성
         for item in report.get("1_value_completeness", []):
             cat = "값 완전성"
             target = item.get("column")
@@ -593,7 +713,6 @@ class MainWindow(QMainWindow):
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
-        # 2. 레코드 완전성
         for item in report.get("2_record_completeness", []):
             cat = "레코드 완전성"
             target = "전체 행"
@@ -604,7 +723,6 @@ class MainWindow(QMainWindow):
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
-        # 3. 구문 유효성
         for item in report.get("3_syntax_validity", []):
             cat = "구문 유효성"
             target = f"{item.get('column')} (패턴: {item.get('pattern')})"
@@ -615,7 +733,6 @@ class MainWindow(QMainWindow):
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
-        # 4. 의미 유효성
         for item in report.get("4_semantic_validity", []):
             cat = "의미 유효성"
             target = item.get("column")
@@ -626,7 +743,6 @@ class MainWindow(QMainWindow):
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
-        # 5. 범위 유효성
         for item in report.get("5_range_validity", []):
             cat = "범위 유효성"
             target = item.get("column")
@@ -638,7 +754,6 @@ class MainWindow(QMainWindow):
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
-        # 6. 관계 유효성
         for item in report.get("6_relationship_validity", []):
             cat = "관계 유효성"
             target = f"formula: {item.get('formula')}"
@@ -649,7 +764,6 @@ class MainWindow(QMainWindow):
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
-        # 7. 참조 무결성
         for item in report.get("7_referential_integrity", []):
             cat = "참조 무결성"
             target = (
