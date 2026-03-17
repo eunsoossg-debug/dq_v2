@@ -1,4 +1,3 @@
 PyQt6
 pandas
 openpyxl
-pyinstaller

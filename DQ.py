@@ -3,17 +3,18 @@ import json
 import pandas as pd
 import re
 import os
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
-                             QHBoxLayout, QWidget, QFileDialog, QLabel, QTableWidget, 
-                             QTableWidgetItem, QCheckBox, QHeaderView, QFrame)
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QPushButton, QVBoxLayout,
+    QHBoxLayout, QWidget, QFileDialog, QLabel, QTableWidget,
+    QTableWidgetItem, QCheckBox, QHeaderView, QFrame
+)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QIcon
 
 class DQChecker:
     def __init__(self, df, rules):
         self.df = df
         self.rules = rules.get("evaluation_rules", {})
-        # 각 지표별 상세 오류 정보를 담는 컨테이너
         self.error_report = {}
 
     def check_value_completeness(self):
@@ -27,7 +28,9 @@ class DQChecker:
 
     def check_syntax_validity(self):
         syntax_rules = self.rules.get("3_syntax_validity", {}).get("columns", {})
-        if not syntax_rules: return 100.0
+        if not syntax_rules:
+            return 100.0
+
         invalid_count, total_checks = 0, 0
         for col, pattern in syntax_rules.items():
             if col in self.df.columns:
@@ -35,67 +38,80 @@ class DQChecker:
                 if not series.empty:
                     def clean_str(x):
                         s = str(x)
-                        return s[:-2] if s.endswith('.0') else s
-                    matches = series.apply(clean_str).apply(lambda x: re.match(pattern, x) is not None)
+                        return s[:-2] if s.endswith(".0") else s
+
+                    matches = series.apply(clean_str).apply(
+                        lambda x: re.match(pattern, x) is not None
+                    )
                     invalid_count += (~matches).sum()
                     total_checks += len(series)
+
         return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
 
     def check_semantic_validity(self):
         semantic_rules = self.rules.get("4_semantic_validity", {}).get("columns", {})
-        if not semantic_rules: return 100.0
+        if not semantic_rules:
+            return 100.0
+
         invalid_count, total_checks = 0, 0
         for col, valid_list in semantic_rules.items():
             if col in self.df.columns:
                 invalid_count += (~self.df[col].isin(valid_list)).sum()
                 total_checks += len(self.df)
+
         return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
 
     def check_range_validity(self):
         range_rules = self.rules.get("5_range_validity", {}).get("columns", {})
-        if not range_rules: return 100.0
+        if not range_rules:
+            return 100.0
+
         invalid_count, total_checks = 0, 0
         for col, limits in range_rules.items():
             if col in self.df.columns:
-                temp_series = pd.to_numeric(self.df[col], errors='coerce')
-                invalid_count += ((temp_series < limits['min']) | (temp_series > limits['max'])).sum()
+                temp_series = pd.to_numeric(self.df[col], errors="coerce")
+                invalid_count += ((temp_series < limits["min"]) | (temp_series > limits["max"])).sum()
                 total_checks += len(self.df)
+
         return (1 - (invalid_count / total_checks)) * 100 if total_checks > 0 else 100
 
     def check_relationship_validity(self):
         rel_rules = self.rules.get("6_relationship_validity", {}).get("rules", [])
-        if not rel_rules: return 100.0
+        if not rel_rules:
+            return 100.0
+
         total_violations = 0
         for rule in rel_rules:
             try:
-                valid_count = len(self.df.query(rule["formula"], engine='python'))
+                valid_count = len(self.df.query(rule["formula"], engine="python"))
                 total_violations += (len(self.df) - valid_count)
-            except: continue
+            except Exception:
+                continue
+
         total_checks = len(self.df) * len(rel_rules)
         return (1 - (total_violations / total_checks)) * 100 if total_checks > 0 else 100
 
     def check_referential_integrity(self):
         ref_rules = self.rules.get("7_referential_integrity", {}).get("checks", [])
-        if not ref_rules: return 100.0
+        if not ref_rules:
+            return 100.0
+
         total_violations = 0
         for rule in ref_rules:
             try:
                 p_path = rule["parent_file"]
-                p_df = pd.read_csv(p_path) if p_path.endswith('.csv') else pd.read_excel(p_path)
+                p_df = pd.read_csv(p_path) if p_path.endswith(".csv") else pd.read_excel(p_path)
                 total_violations += (~self.df[rule["child_column"]].isin(p_df[rule["parent_column"]])).sum()
-            except: continue
+            except Exception:
+                continue
+
         total_checks = len(self.df) * len(ref_rules)
         return (1 - (total_violations / total_checks)) * 100 if total_checks > 0 else 100
 
-    # ---------- 상세 오류 리포트 생성 ----------
     def generate_error_report(self, max_examples_per_item: int = 5):
-        """
-        각 평가 항목별로 어떤 컬럼/행에서 어떤 문제가 발생했는지 요약 리포트를 생성합니다.
-        너무 많은 레코드를 모두 담기보다는, 컬럼/규칙별로 개수와 예시 몇 개만 제공합니다.
-        """
         report = {}
 
-        # 1. 값 완전성 - 컬럼별 결측치 개수 요약
+        # 1. 값 완전성
         null_counts = self.df.isnull().sum()
         issues = []
         for col, cnt in null_counts.items():
@@ -109,7 +125,7 @@ class DQChecker:
         if issues:
             report["1_value_completeness"] = issues
 
-        # 2. 레코드 완전성 - 전체가 비어 있는 행
+        # 2. 레코드 완전성
         empty_rows_mask = self.df.isnull().all(axis=1)
         empty_indices = self.df.index[empty_rows_mask].tolist()
         if empty_indices:
@@ -119,19 +135,20 @@ class DQChecker:
                 "suggestion": "완전히 비어 있는 레코드는 제거하거나 필요한 데이터를 입력하는 것이 좋습니다."
             }]
 
-        # 3. 구문 유효성 - 정규식 미일치 값
+        # 3. 구문 유효성
         syntax_rules = self.rules.get("3_syntax_validity", {}).get("columns", {})
         syntax_issues = []
         for col, pattern in syntax_rules.items():
             if col not in self.df.columns:
                 continue
+
             series = self.df[col].dropna()
             if series.empty:
                 continue
 
             def clean_str(x):
                 s = str(x)
-                return s[:-2] if s.endswith('.0') else s
+                return s[:-2] if s.endswith(".0") else s
 
             cleaned = series.apply(clean_str)
             matches = cleaned.apply(lambda x: re.match(pattern, x) is not None)
@@ -150,12 +167,13 @@ class DQChecker:
         if syntax_issues:
             report["3_syntax_validity"] = syntax_issues
 
-        # 4. 의미 유효성 - 허용 목록에 없는 값
+        # 4. 의미 유효성
         semantic_rules = self.rules.get("4_semantic_validity", {}).get("columns", {})
         semantic_issues = []
         for col, valid_list in semantic_rules.items():
             if col not in self.df.columns:
                 continue
+
             invalid_mask = ~self.df[col].isin(valid_list)
             invalid_idx = self.df.index[invalid_mask].tolist()
             if not invalid_idx:
@@ -172,13 +190,14 @@ class DQChecker:
         if semantic_issues:
             report["4_semantic_validity"] = semantic_issues
 
-        # 5. 범위 유효성 - min/max 밖의 수치
+        # 5. 범위 유효성
         range_rules = self.rules.get("5_range_validity", {}).get("columns", {})
         range_issues = []
         for col, limits in range_rules.items():
             if col not in self.df.columns:
                 continue
-            temp_series = pd.to_numeric(self.df[col], errors='coerce')
+
+            temp_series = pd.to_numeric(self.df[col], errors="coerce")
             invalid_mask = (temp_series < limits["min"]) | (temp_series > limits["max"])
             invalid_idx = temp_series.index[invalid_mask].tolist()
             if not invalid_idx:
@@ -195,7 +214,7 @@ class DQChecker:
         if range_issues:
             report["5_range_validity"] = range_issues
 
-        # 6. 관계 유효성 - formula 규칙 위반 행
+        # 6. 관계 유효성
         rel_rules = self.rules.get("6_relationship_validity", {}).get("rules", [])
         rel_issues = []
         for rule in rel_rules:
@@ -219,7 +238,7 @@ class DQChecker:
         if rel_issues:
             report["6_relationship_validity"] = rel_issues
 
-        # 7. 참조 무결성 - 부모 테이블에 존재하지 않는 값
+        # 7. 참조 무결성
         ref_rules = self.rules.get("7_referential_integrity", {}).get("checks", [])
         ref_issues = []
         for rule in ref_rules:
@@ -228,12 +247,15 @@ class DQChecker:
                 p_df = pd.read_csv(p_path) if p_path.endswith(".csv") else pd.read_excel(p_path)
                 child_col = rule["child_column"]
                 parent_col = rule["parent_column"]
+
                 if child_col not in self.df.columns or parent_col not in p_df.columns:
                     continue
+
                 invalid_mask = ~self.df[child_col].isin(p_df[parent_col])
                 invalid_idx = self.df.index[invalid_mask].tolist()
                 if not invalid_idx:
                     continue
+
                 examples = self.df.loc[invalid_mask, child_col].astype(str).head(max_examples_per_item).tolist()
                 ref_issues.append({
                     "child_column": child_col,
@@ -248,9 +270,9 @@ class DQChecker:
         if ref_issues:
             report["7_referential_integrity"] = ref_issues
 
-        # 내부 상태로도 보관
         self.error_report = report
         return report
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -265,43 +287,47 @@ class MainWindow(QMainWindow):
 
     def apply_style(self):
         self.setStyleSheet("""
-            /* 전체 배경 및 텍스트 설정 */
             QMainWindow { background-color: #0F111A; }
             QWidget { color: #CFD8DC; font-family: 'Segoe UI', sans-serif; }
-            
-            /* 버튼 스타일 */
+
             QPushButton {
-                background-color: #1A1D2E; border: 1px solid #2A2F45;
-                border-radius: 8px; padding: 12px; font-weight: bold;
+                background-color: #1A1D2E;
+                border: 1px solid #2A2F45;
+                border-radius: 8px;
+                padding: 12px;
+                font-weight: bold;
             }
-            QPushButton:hover { background-color: #242942; border-color: #00A3FF; }
+            QPushButton:hover {
+                background-color: #242942;
+                border-color: #00A3FF;
+            }
             QPushButton#run_btn {
-                background-color: #00A3FF; color: white; font-size: 16px; margin-top: 15px; border: none;
+                background-color: #00A3FF;
+                color: white;
+                font-size: 16px;
+                margin-top: 15px;
+                border: none;
             }
-            
-            /* 테이블 스타일 */
-           QTableWidget {
-                background-color: #161925; /* 테이블 자체 배경 */
-                alternate-background-color: #1F2335; /* 줄마다 색상 다르게 (필요시) */
+
+            QTableWidget {
+                background-color: #161925;
+                alternate-background-color: #1F2335;
                 border: 1px solid #232738;
-                gridline-color: #232738; /* 칸 구분선 색상 */
+                gridline-color: #232738;
                 border-radius: 12px;
                 color: #CFD8DC;
             }
 
-            /* 2. 테이블 내부 아이템(글자/칸) 배경 강제 지정 */
             QTableWidget::item {
                 background-color: #161925;
                 padding: 5px;
             }
 
-            /* 3. 데이터 선택 시 배경색 (하얗게 변하는 것 방지) */
             QTableWidget::item:selected {
                 background-color: #00A3FF;
                 color: white;
             }
 
-            /* 4. 헤더(Dimension, Accuracy 칸) 디자인 */
             QHeaderView::section {
                 background-color: #1F2335;
                 color: #78909C;
@@ -310,49 +336,30 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
             }
 
-            /* 5. 스크롤바가 붙는 코너(모퉁이) 부분 하얀색 방지 */
             QAbstractScrollArea QWidget {
                 background-color: #161925;
             }
 
-            /* 6. 스크롤바 스타일 (강제 적용) */
-            QScrollBar:vertical {
-                border: none;
-                background: #161925;
-                width: 10px;
-            }
-            QScrollBar::handle:vertical {
-                background: #37474F;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #00A3FF;
-            }
-            QHeaderView::section {
-                background-color: #1F2335; color: #78909C; padding: 12px; border: none;
-            }
-            
-            /* 하단 등급 컨테이너 */
             #grade_container {
-                background-color: #1A1D2E; border: 1px solid #2D334A; border-radius: 15px;
+                background-color: #1A1D2E;
+                border: 1px solid #2D334A;
+                border-radius: 15px;
             }
 
-            /* --- 스크롤바 강제 스타일 적용 (이 부분을 수정했습니다) --- */
             QScrollBar:vertical {
                 border: none;
-                background-color: #161925; /* 배경색 강제 지정 */
+                background-color: #161925;
                 width: 12px;
                 margin: 0px;
             }
             QScrollBar::handle:vertical {
-                background-color: #454D66; /* 바 색상을 조금 더 밝게 조정 */
+                background-color: #454D66;
                 min-height: 30px;
                 border-radius: 6px;
             }
             QScrollBar::handle:vertical:hover {
                 background-color: #00A3FF;
             }
-            /* 스크롤바 화살표 버튼을 완전히 투명하게 삭제 */
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 border: none;
                 background: none;
@@ -365,7 +372,6 @@ class MainWindow(QMainWindow):
                 background: none;
             }
 
-            /* 가로 스크롤바도 동일하게 적용 */
             QScrollBar:horizontal {
                 border: none;
                 background-color: #161925;
@@ -380,6 +386,7 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+
         main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(25, 25, 25, 25)
 
@@ -388,7 +395,7 @@ class MainWindow(QMainWindow):
         logo.setStyleSheet("font-size: 24px; font-weight: 800; color: #00A3FF; margin-bottom: 25px;")
         sidebar.addWidget(logo)
 
-        self.btn_data = QPushButton("📁 Load Dataset")
+        self.btn_data = QPushButton("Load Dataset")
         self.btn_json = QPushButton("⚙️ Load Rules (JSON)")
         self.btn_data.clicked.connect(self.load_file)
         self.btn_json.clicked.connect(self.load_json)
@@ -397,21 +404,33 @@ class MainWindow(QMainWindow):
 
         sidebar.addSpacing(35)
         sidebar.addWidget(QLabel("ANALYSIS METRICS"))
+
         self.checks = {
-            "Value": QCheckBox("데이터값완전성"), "Record": QCheckBox("데이터레코드완전성"),
-            "Syntax": QCheckBox("구문유효성"), "Semantic": QCheckBox("의미유효성"),
-            "Range": QCheckBox("범위유효성"), "Rel": QCheckBox("관계유효성"), "Ref": QCheckBox("참조무결일관성")
+            "Value": QCheckBox("데이터값완전성"),
+            "Record": QCheckBox("데이터레코드완전성"),
+            "Syntax": QCheckBox("구문유효성"),
+            "Semantic": QCheckBox("의미유효성"),
+            "Range": QCheckBox("범위유효성"),
+            "Rel": QCheckBox("관계유효성"),
+            "Ref": QCheckBox("참조무결일관성")
         }
+
         for cb in self.checks.values():
             cb.setChecked(True)
             sidebar.addWidget(cb)
 
         sidebar.addStretch()
+
         self.btn_run = QPushButton("START ANALYSIS")
         self.btn_run.setObjectName("run_btn")
         self.btn_run.clicked.connect(self.run_eval)
         sidebar.addWidget(self.btn_run)
-        
+
+        self.btn_download = QPushButton("DOWNLOAD ERROR REPORT (CSV)")
+        self.btn_download.clicked.connect(self.download_error_report_csv)
+        self.btn_download.setEnabled(False)
+        sidebar.addWidget(self.btn_download)
+
         self.status_bar = QLabel("System Ready")
         sidebar.addWidget(self.status_bar)
 
@@ -429,7 +448,7 @@ class MainWindow(QMainWindow):
         self.error_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         content_area.addWidget(self.error_table)
 
-        # --- 등급 판정 하단 패널 ---
+        # 하단: 등급 패널
         self.grade_container = QFrame()
         self.grade_container.setObjectName("grade_container")
         self.grade_container.setFixedHeight(160)
@@ -438,8 +457,11 @@ class MainWindow(QMainWindow):
         self.grade_badge = QLabel("-")
         self.grade_badge.setFixedSize(90, 90)
         self.grade_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.grade_badge.setStyleSheet("background-color: #232738; border-radius: 45px; color: #444; font-size: 45px; font-weight: bold; border: 2px solid #2D334A;")
-        
+        self.grade_badge.setStyleSheet(
+            "background-color: #232738; border-radius: 45px; color: #444; "
+            "font-size: 45px; font-weight: bold; border: 2px solid #2D334A;"
+        )
+
         text_info = QVBoxLayout()
         self.grade_title = QLabel("QUALITY REPORT SUMMARY")
         self.grade_title.setStyleSheet("color: #546E7A; font-size: 12px; font-weight: bold;")
@@ -447,7 +469,7 @@ class MainWindow(QMainWindow):
         self.avg_score_label.setStyleSheet("color: #FFFFFF; font-size: 28px; font-weight: bold;")
         self.grade_desc = QLabel("Result description will appear here.")
         self.grade_desc.setStyleSheet("color: #546E7A; font-size: 14px;")
-        
+
         text_info.addWidget(self.grade_title)
         text_info.addWidget(self.avg_score_label)
         text_info.addWidget(self.grade_desc)
@@ -464,20 +486,33 @@ class MainWindow(QMainWindow):
     def load_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Data", "", "Data (*.csv *.xlsx)")
         if path:
-            self.data_df = pd.read_csv(path) if path.endswith('.csv') else pd.read_excel(path)
-            self.status_bar.setText(f"File: {os.path.basename(path)}")
+            try:
+                self.data_df = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path)
+                self.status_bar.setText(f"File loaded: {os.path.basename(path)}")
+            except Exception as e:
+                self.status_bar.setText(f"파일 로드 실패: {str(e)}")
 
     def load_json(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Rules", "", "JSON (*.json)")
         if path:
-            with open(path, 'r', encoding='utf-8') as f:
-                self.rules = json.load(f)
-            self.status_bar.setText(f"Rules: {os.path.basename(path)}")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self.rules = json.load(f)
+                self.status_bar.setText(f"Rules loaded: {os.path.basename(path)}")
+            except Exception as e:
+                self.status_bar.setText(f"룰 로드 실패: {str(e)}")
 
     def run_eval(self):
-        if self.data_df is None or self.rules is None: return
+        if self.data_df is None:
+            self.status_bar.setText("먼저 데이터 파일을 불러오세요.")
+            return
+
+        if self.rules is None:
+            self.status_bar.setText("먼저 규칙(JSON) 파일을 불러오세요.")
+            return
 
         checker = DQChecker(self.data_df, self.rules)
+
         mapping = {
             "Value": ("데이터값완전성", checker.check_value_completeness),
             "Record": ("데이터레코드완전성", checker.check_record_completeness),
@@ -490,39 +525,54 @@ class MainWindow(QMainWindow):
 
         self.result_table.setRowCount(0)
         self.error_table.setRowCount(0)
+        self.btn_download.setEnabled(False)
+
         scores = []
         for key, (name, func) in mapping.items():
             if self.checks[key].isChecked():
                 row = self.result_table.rowCount()
                 self.result_table.insertRow(row)
+
                 score = func()
                 scores.append(score)
+
                 self.result_table.setItem(row, 0, QTableWidgetItem(name))
                 self.result_table.setItem(row, 1, QTableWidgetItem(f"{score:.2f}%"))
 
         if scores:
             avg = sum(scores) / len(scores)
-            if avg >= 99: g, color, desc = "A", "#00E676", "Excellent: High quality data detected."
-            elif avg >= 97: g, color, desc = "B", "#00B0FF", "Good: Reliable data with minor issues."
-            elif avg >= 95: g, color, desc = "C", "#FFD600", "Fair: Attention required."
-            else: g, color, desc = "D", "#FF5252", "Poor: Needs cleansing."
+            if avg >= 99:
+                g, color, desc = "A", "#00E676", "Excellent: High quality data detected."
+            elif avg >= 97:
+                g, color, desc = "B", "#00B0FF", "Good: Reliable data with minor issues."
+            elif avg >= 95:
+                g, color, desc = "C", "#FFD600", "Fair: Attention required."
+            else:
+                g, color, desc = "D", "#FF5252", "Poor: Needs cleansing."
 
             self.grade_badge.setText(g)
-            # 테두리는 어둡게 고정하고, 글자색(color)만 바꿔서 깔끔하게 유지합니다.
-            self.grade_badge.setStyleSheet(f"background-color: #1A1D2E; border-radius: 45px; color: {color}; font-size: 45px; font-weight: bold; border: 3px solid {color};")
+            self.grade_badge.setStyleSheet(
+                f"background-color: #1A1D2E; border-radius: 45px; color: {color}; "
+                f"font-size: 45px; font-weight: bold; border: 3px solid {color};"
+            )
             self.avg_score_label.setText(f"{avg:.2f}%")
             self.grade_desc.setText(desc)
             self.grade_desc.setStyleSheet(f"color: {color}; font-size: 14px;")
-            # 컨테이너 테두리는 아주 은은하게만 강조합니다.
-            self.grade_container.setStyleSheet(f"background-color: #161925; border: 1px solid #2D334A; border-radius: 15px;")
+            self.grade_container.setStyleSheet(
+                "background-color: #161925; border: 1px solid #2D334A; border-radius: 15px;"
+            )
 
-        # 상세 오류 리포트 생성 후 테이블에 표시
         error_report = checker.generate_error_report()
         self.last_error_report = error_report
         self.populate_error_table(error_report)
 
+        if self.error_table.rowCount() > 0:
+            self.btn_download.setEnabled(True)
+            self.status_bar.setText("분석 완료. 오류 리포트를 CSV로 저장할 수 있습니다.")
+        else:
+            self.status_bar.setText("분석 완료. 저장할 오류 리포트가 없습니다.")
+
     def populate_error_table(self, report):
-        """generate_error_report 결과 딕셔너리를 GUI 테이블 형태로 변환해서 표시."""
         self.error_table.setRowCount(0)
         if not report:
             return
@@ -547,7 +597,10 @@ class MainWindow(QMainWindow):
         for item in report.get("2_record_completeness", []):
             cat = "레코드 완전성"
             target = "전체 행"
-            issue = f"완전 빈 행 {item.get('empty_row_count', 0)}개, 예시 인덱스: {item.get('empty_row_indices_example', [])}"
+            issue = (
+                f"완전 빈 행 {item.get('empty_row_count', 0)}개, "
+                f"예시 인덱스: {item.get('empty_row_indices_example', [])}"
+            )
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
@@ -555,7 +608,10 @@ class MainWindow(QMainWindow):
         for item in report.get("3_syntax_validity", []):
             cat = "구문 유효성"
             target = f"{item.get('column')} (패턴: {item.get('pattern')})"
-            issue = f"형식 불일치 {item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            issue = (
+                f"형식 불일치 {item.get('invalid_value_count', 0)}개, "
+                f"예시: {item.get('invalid_examples', [])}"
+            )
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
@@ -563,7 +619,10 @@ class MainWindow(QMainWindow):
         for item in report.get("4_semantic_validity", []):
             cat = "의미 유효성"
             target = item.get("column")
-            issue = f"허용값 외 {item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            issue = (
+                f"허용값 외 {item.get('invalid_value_count', 0)}개, "
+                f"예시: {item.get('invalid_examples', [])}"
+            )
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
@@ -572,7 +631,10 @@ class MainWindow(QMainWindow):
             cat = "범위 유효성"
             target = item.get("column")
             rng = item.get("expected_range", {})
-            issue = f"범위({rng.get('min')}, {rng.get('max')}) 밖 값 {item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            issue = (
+                f"범위({rng.get('min')}, {rng.get('max')}) 밖 값 "
+                f"{item.get('invalid_value_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            )
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
@@ -580,17 +642,63 @@ class MainWindow(QMainWindow):
         for item in report.get("6_relationship_validity", []):
             cat = "관계 유효성"
             target = f"formula: {item.get('formula')}"
-            issue = f"규칙 위반 행 {item.get('violated_row_count', 0)}개, 예시 인덱스: {item.get('violated_row_indices_example', [])}"
+            issue = (
+                f"규칙 위반 행 {item.get('violated_row_count', 0)}개, "
+                f"예시 인덱스: {item.get('violated_row_indices_example', [])}"
+            )
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
 
         # 7. 참조 무결성
         for item in report.get("7_referential_integrity", []):
             cat = "참조 무결성"
-            target = f"{item.get('child_column')} -> {item.get('parent_column')} ({os.path.basename(item.get('parent_file', ''))})"
-            issue = f"부모에 없는 값 {item.get('violated_row_count', 0)}개, 예시: {item.get('invalid_examples', [])}"
+            target = (
+                f"{item.get('child_column')} -> {item.get('parent_column')} "
+                f"({os.path.basename(item.get('parent_file', ''))})"
+            )
+            issue = (
+                f"부모에 없는 값 {item.get('violated_row_count', 0)}개, "
+                f"예시: {item.get('invalid_examples', [])}"
+            )
             sugg = item.get("suggestion", "")
             add_row(cat, target, issue, sugg)
+
+    def download_error_report_csv(self):
+        if self.error_table.rowCount() == 0:
+            self.status_bar.setText("저장할 오류 리포트가 없습니다. 먼저 분석을 실행하세요.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Error Report CSV",
+            "error_report.csv",
+            "CSV Files (*.csv)"
+        )
+
+        if not path:
+            return
+
+        try:
+            headers = []
+            for col in range(self.error_table.columnCount()):
+                header_item = self.error_table.horizontalHeaderItem(col)
+                headers.append(header_item.text() if header_item else f"Column {col}")
+
+            rows = []
+            for row in range(self.error_table.rowCount()):
+                row_data = []
+                for col in range(self.error_table.columnCount()):
+                    item = self.error_table.item(row, col)
+                    row_data.append(item.text() if item else "")
+                rows.append(row_data)
+
+            df_export = pd.DataFrame(rows, columns=headers)
+            df_export.to_csv(path, index=False, encoding="utf-8-sig")
+            self.status_bar.setText(f"CSV 저장 완료: {os.path.basename(path)}")
+
+        except Exception as e:
+            self.status_bar.setText(f"CSV 저장 실패: {str(e)}")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
